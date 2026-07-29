@@ -1,0 +1,16 @@
+# Build output
+target/
+
+# Frontend / Demo files
+frontend/
+fronted/
+newfronted/
+oldfronted/
+
+# IDE
+.idea/
+.DS_Store
+
+# Node
+node_modules/
+*.log
