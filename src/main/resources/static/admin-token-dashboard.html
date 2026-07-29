@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>企智通 · 管理员后台 - Token统计看板</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', 'Noto Sans SC', system-ui, sans-serif; }
+        .card { transition: all 0.2s cubic-bezier(0.4, 0.0, 0.2, 1); }
+        .card:hover { transform: translateY(-1px); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); }
+        .section-header { font-weight: 600; color: #1e2937; }
+        .metric { font-variant-numeric: tabular-nums; }
+        .data-table th { background: #f8fafc; font-weight: 600; color: #475569; }
+        .nav-active { background: #eff6ff; color: #1e40af; font-weight: 600; }
+    </style>
+</head>
+<body class="bg-slate-100">
+    <!-- Admin Top Bar -->
+    <div class="bg-slate-900 text-white">
+        <div class="max-w-screen-2xl mx-auto px-8 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-x-4">
+                <div class="flex items-center gap-x-3">
+                    <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+                        <i class="fa-solid fa-robot text-white"></i>
+                    </div>
+                    <div>
+                        <span class="font-bold text-xl tracking-tight">企智通</span>
+                        <span class="ml-2 text-xs px-2 py-0.5 bg-white/10 rounded text-blue-200">管理员后台</span>
+                    </div>
+                </div>
+                <div class="text-xs text-slate-400 pl-4 border-l border-white/20">Token 统计与配额管理</div>
+            </div>
+            
+            <div class="flex items-center gap-x-4 text-sm">
+                <div class="flex items-center gap-x-2 px-3 py-1.5 bg-white/10 rounded-2xl">
+                    <img src="https://i.pravatar.cc/24?img=47" class="w-6 h-6 rounded-full">
+                    <span id="admin-name" class="font-medium">管理员</span>
+                    <span class="text-xs bg-emerald-500 px-2 py-px rounded">Admin</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="max-w-screen-2xl mx-auto px-8 pt-8 pb-12">
+        <!-- Header -->
+        <div class="flex items-end justify-between mb-8">
+            <div>
+                <h1 class="text-3xl font-bold tracking-tighter text-slate-900">Token 使用统计看板</h1>
+                <p class="text-slate-500 mt-1">实时监控全员 Token 消耗 · 配额管理 · 立即生效</p>
+            </div>
+            <div class="flex gap-x-3">
+                <button onclick="loadAll()" class="px-5 py-2.5 bg-white border border-slate-300 hover:bg-slate-50 rounded-2xl text-sm font-medium flex items-center gap-x-2">
+                    <i class="fa-solid fa-sync-alt"></i>
+                    <span>刷新数据</span>
+                </button>
+                <div class="text-xs px-4 py-2.5 bg-white border border-slate-200 rounded-2xl text-slate-500 flex items-center">
+                    <i class="fa-regular fa-clock mr-2"></i> 最后更新：<span id="last-update">加载中...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- KPI Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm card">
+                <div class="flex justify-between">
+                    <div>
+                        <div class="text-sm text-slate-500">活跃用户数</div>
+                        <div class="text-5xl font-semibold tabular-nums tracking-tighter mt-3 text-slate-900 metric" id="kpi-active">—</div>
+                        <div class="text-emerald-600 text-sm mt-1" id="kpi-active-sub">加载中...</div>
+                    </div>
+                    <div class="w-14 h-14 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center">
+                        <i class="fa-solid fa-users text-3xl"></i>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm card">
+                <div class="flex justify-between">
+                    <div>
+                        <div class="text-sm text-slate-500">超额用户数</div>
+                        <div class="text-5xl font-semibold tabular-nums tracking-tighter mt-3 text-red-600 metric" id="kpi-over">—</div>
+                        <div class="text-red-500 text-sm mt-1" id="kpi-over-sub">加载中...</div>
+                    </div>
+                    <div class="w-14 h-14 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center">
+                        <i class="fa-solid fa-exclamation-triangle text-3xl"></i>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm card">
+                <div class="flex justify-between">
+                    <div>
+                        <div class="text-sm text-slate-500">今日总消耗</div>
+                        <div class="flex items-baseline mt-3">
+                            <span class="text-5xl font-semibold tabular-nums tracking-tighter text-slate-900 metric" id="kpi-total">—</span>
+                            <span class="text-2xl text-slate-400 ml-1">M</span>
+                        </div>
+                        <div class="text-emerald-600 text-sm mt-1" id="kpi-total-sub">加载中...</div>
+                    </div>
+                    <div class="w-14 h-14 bg-blue-100 text-blue-600 rounded-2xl flex items-center justify-center">
+                        <i class="fa-solid fa-chart-line text-3xl"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart -->
+        <div class="bg-white rounded-3xl p-7 border border-slate-100 shadow-sm mb-8 card">
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <div class="section-header text-xl flex items-center gap-x-3">
+                        <i class="fa-solid fa-chart-bar text-blue-600"></i>
+                        <span>近7日各模型 Token 消耗趋势</span>
+                    </div>
+                    <p class="text-sm text-slate-500 mt-1">按天统计 · 不同颜色区分大模型</p>
+                </div>
+                <div class="flex gap-x-2 text-xs" id="chart-legend">
+                    <!-- 动态生成模型标签 -->
+                </div>
+            </div>
+            <div class="h-[340px]">
+                <canvas id="adminChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Table + Quota -->
+        <div class="grid grid-cols-1 xl:grid-cols-12 gap-6">
+            <!-- Employee Table -->
+            <div class="xl:col-span-8 bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden card">
+                <div class="px-7 py-5 border-b flex items-center justify-between">
+                    <div class="section-header text-lg">员工 Token 使用明细（今日）</div>
+                    <div class="flex items-center gap-x-3">
+                        <select id="deptFilter" onchange="filterTable()" class="border border-slate-300 rounded-2xl px-4 py-2 text-sm">
+                            <option value="">全部部门</option>
+                        </select>
+                        <input id="searchInput" oninput="filterTable()" placeholder="搜索姓名或ID..." 
+                               class="border border-slate-300 rounded-2xl px-4 py-2 text-sm w-64">
+                    </div>
+                </div>
+                
+                <div class="overflow-auto max-h-[420px]">
+                    <table class="w-full text-sm data-table">
+                        <thead>
+                            <tr class="border-b text-left text-slate-500">
+                                <th class="px-7 py-4">员工</th>
+                                <th class="px-4 py-4">部门</th>
+                                <th class="px-4 py-4 text-right">今日用量</th>
+                                <th class="px-4 py-4 text-right">限额</th>
+                                <th class="px-4 py-4 text-center">使用率</th>
+                                <th class="px-4 py-4 text-center">状态</th>
+                                <th class="px-7 py-4 text-center">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tbody" class="divide-y">
+                            <tr><td colspan="7" class="px-7 py-8 text-center text-slate-400">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="px-7 py-3 bg-slate-50 text-xs text-slate-500 flex justify-between items-center">
+                    <div>共 <span id="totalCount">0</span> 人 · 每日 00:00 自动清零</div>
+                    <div id="page-info">—</div>
+                </div>
+            </div>
+
+            <!-- Quota Setting -->
+            <div class="xl:col-span-4 bg-white rounded-3xl border border-slate-100 shadow-sm p-7 card flex flex-col">
+                <div class="section-header text-lg mb-4 flex items-center gap-x-2">
+                    <i class="fa-solid fa-sliders-h text-blue-600"></i>
+                    <span>统一配额设置</span>
+                </div>
+                
+                <div class="mb-6">
+                    <div class="text-xs text-slate-500 mb-1">当前全局默认限额</div>
+                    <div class="flex items-baseline">
+                        <span id="currentLimit" class="font-mono text-6xl font-semibold tabular-nums tracking-tighter">—</span>
+                        <span class="text-slate-400 ml-2">tokens/日</span>
+                    </div>
+                </div>
+                
+                <div class="mt-auto">
+                    <label class="text-xs font-medium text-slate-500 block mb-2">设置新的统一限额（立即生效）</label>
+                    <div class="flex gap-x-3">
+                        <input id="newLimitInput" type="number" value="120000" step="5000"
+                               class="flex-1 border border-slate-300 focus:border-blue-500 rounded-2xl px-5 py-3 text-xl font-mono outline-none">
+                        <button onclick="applyQuota()" 
+                                class="px-8 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold rounded-2xl text-sm whitespace-nowrap transition-colors">
+                            保存并应用
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-amber-600 mt-3 flex items-center gap-x-1.5">
+                        <i class="fa-solid fa-bolt"></i>
+                        <span>调用后端接口 PUT /api/v1/admin/token/quota 后立即生效</span>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==================== 真实后端 API 对接 ====================
+        const API_BASE = '';
+        const CHART_COLORS = ['#2563eb','#10b981','#f59e0b','#ef4444','#06b6d4','#ec4899','#8b5cf6','#f97316'];
+        const LEGEND_BG = ['bg-blue-50 text-blue-700','bg-emerald-50 text-emerald-700','bg-amber-50 text-amber-700','bg-red-50 text-red-700','bg-cyan-50 text-cyan-700','bg-pink-50 text-pink-700','bg-violet-50 text-violet-700','bg-orange-50 text-orange-700'];
+        const LEGEND_DOT = ['bg-blue-600','bg-emerald-600','bg-amber-500','bg-red-500','bg-cyan-500','bg-pink-500','bg-violet-500','bg-orange-500'];
+
+        let employees = [];
+        let globalLimit = 100000;
+        let chartInstance = null;
+
+        // ==================== 数据加载 ====================
+
+        async function loadDashboard() {
+            try {
+                const r = await fetch(API_BASE + '/api/v1/admin/token/dashboard');
+                const j = await r.json();
+                if (!j.success || !j.rawData) { console.warn('Dashboard API error'); return; }
+                const d = j.rawData;
+
+                // KPI 卡片
+                document.getElementById('kpi-active').textContent = (d.activeUsers || 0).toLocaleString();
+                document.getElementById('kpi-active-sub').textContent = '今日有消耗的用户';
+                document.getElementById('kpi-over').textContent = (d.overQuotaUsers || 0).toLocaleString();
+                document.getElementById('kpi-over-sub').textContent = d.overQuotaUsers > 0 ? '需关注这些用户' : '无超额用户 ✓';
+                const totalM = ((d.todayTotalConsumption || 0) / 1000000);
+                document.getElementById('kpi-total').textContent = totalM.toFixed(1);
+                document.getElementById('kpi-total-sub').textContent = '今日 Token 累计消耗';
+
+                // 全局限额
+                globalLimit = d.globalLimit || 100000;
+                document.getElementById('currentLimit').textContent = globalLimit.toLocaleString();
+                document.getElementById('newLimitInput').value = globalLimit;
+
+                // 图表
+                renderChart(d.chartData);
+
+                // 更新时间
+                updateTime();
+            } catch (e) {
+                console.error('Dashboard load error:', e);
+                showToast('Dashboard 数据加载失败', 'error');
+            }
+        }
+
+        async function loadUsage() {
+            try {
+                const r = await fetch(API_BASE + '/api/admin/token/usage');
+                const j = await r.json();
+                if (!j.success || !j.data) { console.warn('Usage API error'); return; }
+                const d = j.data;
+
+                // 更新部门筛选器
+                const deptSet = new Set();
+                const users = (d.userUsageRows || d.users || []).map(u => {
+                    deptSet.add(u.department);
+                    const quota = u.quota || globalLimit;
+                    const used = u.totalTokens;
+                    let status = 'normal';
+                    if (u.overQuota || (quota > 0 && used >= quota)) status = 'over';
+                    else if (quota > 0 && used / quota > 0.85) status = 'warning';
+                    return {
+                        id: String(u.userId || u.id),
+                        name: u.name,
+                        dept: u.department,
+                        used: used,
+                        limit: quota,
+                        status: status
+                    };
+                });
+
+                employees = users;
+
+                // 填充部门下拉框
+                const depts = [...deptSet].sort();
+                const deptSel = document.getElementById('deptFilter');
+                deptSel.innerHTML = '<option value="">全部部门</option>' + depts.map(dp => `<option value="${dp}">${dp}</option>`).join('');
+
+                // 渲染表格
+                renderTable();
+            } catch (e) {
+                console.error('Usage load error:', e);
+            }
+        }
+
+        function loadAll() {
+            loadDashboard();
+            loadUsage();
+        }
+
+        // ==================== 图表 ====================
+
+        function renderChart(chartData) {
+            const ctx = document.getElementById('adminChart').getContext('2d');
+
+            // 生成模型标签
+            const legendEl = document.getElementById('chart-legend');
+            if (chartData && chartData.datasets) {
+                legendEl.innerHTML = chartData.datasets.map((ds, i) =>
+                    `<div class="px-4 py-1.5 ${LEGEND_BG[i % LEGEND_BG.length]} rounded-2xl flex items-center gap-x-2">
+                        <div class="w-2 h-2 ${LEGEND_DOT[i % LEGEND_DOT.length]} rounded-full"></div> ${ds.label}
+                    </div>`
+                ).join('');
+            }
+
+            const datasets = (chartData && chartData.datasets || []).map((ds, i) => ({
+                label: ds.label,
+                data: ds.data || [],
+                backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
+                borderRadius: 5,
+                barThickness: 16
+            }));
+
+            // 默认空图表
+            const labels = (chartData && chartData.labels && chartData.labels.length > 0) ? chartData.labels : generateDateLabels();
+
+            if (chartInstance) chartInstance.destroy();
+
+            chartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: c => c.dataset.label + ': ' + c.raw.toLocaleString() + ' tokens'
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: '#f1e7ff' } },
+                        y: {
+                            grid: { color: '#f1e7ff' },
+                            ticks: { callback: v => (v / 1000000).toFixed(1) + 'M' }
+                        }
+                    }
+                }
+            });
+        }
+
+        function generateDateLabels() {
+            const labels = [];
+            const weekdays = ['周日','周一','周二','周三','周四','周五','周六'];
+            const today = new Date();
+            for (let i = 6; i >= 0; i--) {
+                const d = new Date(today);
+                d.setDate(today.getDate() - i);
+                labels.push(`${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${weekdays[d.getDay()]}`);
+            }
+            return labels;
+        }
+
+        // ==================== 表格 ====================
+
+        function renderTable(filtered) {
+            const data = filtered || employees;
+            const tbody = document.getElementById('tbody');
+
+            if (data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="px-7 py-8 text-center text-slate-400">暂无数据，请先刷新</td></tr>';
+                document.getElementById('totalCount').textContent = '0';
+                return;
+            }
+
+            tbody.innerHTML = data.map(emp => {
+                const percent = Math.min(Math.round((emp.used / emp.limit) * 100), 100);
+                let statusHTML;
+                if (emp.status === 'over') statusHTML = '<span class="px-3 py-px text-xs rounded-full bg-red-100 text-red-700 font-medium">已超额</span>';
+                else if (emp.status === 'warning') statusHTML = '<span class="px-3 py-px text-xs rounded-full bg-amber-100 text-amber-700 font-medium">即将超</span>';
+                else statusHTML = '<span class="px-3 py-px text-xs rounded-full bg-emerald-100 text-emerald-700 font-medium">正常</span>';
+
+                return `
+                    <tr class="hover:bg-slate-50">
+                        <td class="px-7 py-4">
+                            <div class="flex items-center gap-x-3">
+                                <div class="w-7 h-7 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white text-xs font-bold">
+                                    ${(emp.name || '?')[0]}
+                                </div>
+                                <div>
+                                    <div class="font-medium">${emp.name}</div>
+                                    <div class="text-xs text-slate-400 font-mono">ID:${emp.id}</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td class="px-4 py-4"><span class="px-3 py-1 text-xs bg-slate-100 rounded-xl">${emp.dept}</span></td>
+                        <td class="px-4 py-4 text-right font-mono font-semibold">${emp.used.toLocaleString()}</td>
+                        <td class="px-4 py-4 text-right font-mono text-slate-500">${emp.limit.toLocaleString()}</td>
+                        <td class="px-4 py-4">
+                            <div class="flex flex-col items-center">
+                                <div class="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden mb-1">
+                                    <div class="h-1.5 rounded-full ${percent > 90 ? 'bg-red-500' : percent > 70 ? 'bg-amber-500' : 'bg-emerald-500'}" style="width:${percent}%"></div>
+                                </div>
+                                <span class="text-xs font-medium">${percent}%</span>
+                            </div>
+                        </td>
+                        <td class="px-4 py-4 text-center">${statusHTML}</td>
+                        <td class="px-7 py-4 text-center">
+                            <button onclick="adjustQuota('${emp.id}')" class="text-xs px-4 py-1 text-blue-600 hover:bg-blue-50 rounded-xl">调整限额</button>
+                        </td>
+                    </tr>`;
+            }).join('');
+
+            document.getElementById('totalCount').textContent = data.length;
+        }
+
+        function filterTable() {
+            const dept = document.getElementById('deptFilter').value;
+            const keyword = document.getElementById('searchInput').value.toLowerCase();
+            let filtered = employees;
+            if (dept) filtered = filtered.filter(e => e.dept === dept);
+            if (keyword) filtered = filtered.filter(e => e.name.toLowerCase().includes(keyword) || e.id.toLowerCase().includes(keyword));
+            renderTable(filtered);
+        }
+
+        // ==================== 配额操作 ====================
+
+        async function applyQuota() {
+            const inputEl = document.getElementById('newLimitInput');
+            const newLimit = parseInt(inputEl.value);
+
+            if (!newLimit || newLimit < 1000) {
+                alert('请输入有效数字 ≥ 1000');
+                return;
+            }
+
+            inputEl.disabled = true;
+
+            try {
+                const r = await fetch(API_BASE + '/api/v1/admin/token/quota', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ daily_token_limit: newLimit })
+                });
+                const j = await r.json();
+
+                if (j.success) {
+                    globalLimit = newLimit;
+                    document.getElementById('currentLimit').textContent = globalLimit.toLocaleString();
+                    showToast(`全局配额已更新为 ${newLimit.toLocaleString()}，立即生效！`, 'success');
+                    loadAll(); // 重新加载数据
+                } else {
+                    showToast(j.message || '更新失败', 'error');
+                }
+            } catch (e) {
+                showToast('更新失败，请重试', 'error');
+            } finally {
+                inputEl.disabled = false;
+            }
+        }
+
+        async function adjustQuota(userId) {
+            const emp = employees.find(e => e.id === userId);
+            if (!emp) return;
+            const newVal = prompt(`为 ${emp.name} 设置新限额（当前 ${emp.limit.toLocaleString()}）：`, emp.limit);
+            if (!newVal) return;
+            const num = parseInt(newVal);
+            if (isNaN(num) || num < 1000) { alert('请输入有效数字 ≥ 1000'); return; }
+
+            try {
+                const r = await fetch(API_BASE + '/api/v1/admin/token/quota/' + userId, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ daily_token_limit: num })
+                });
+                const j = await r.json();
+                if (j.success) {
+                    showToast(`${emp.name} 限额已更新为 ${num.toLocaleString()}，立即生效`, 'success');
+                    loadAll();
+                } else {
+                    showToast(j.message || '更新失败', 'error');
+                }
+            } catch (e) {
+                showToast('更新失败', 'error');
+            }
+        }
+
+        // ==================== 工具函数 ====================
+
+        function showToast(msg, type) {
+            const toast = document.createElement('div');
+            toast.className = `fixed bottom-6 right-6 px-6 py-3 rounded-2xl shadow-xl text-white text-sm flex items-center gap-x-3 z-50 ${type === 'success' ? 'bg-emerald-600' : 'bg-red-600'}`;
+            toast.innerHTML = `<i class="fa-solid ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'}"></i> <span>${msg}</span>`;
+            document.body.appendChild(toast);
+            setTimeout(() => { toast.style.transition = 'all .2s'; toast.style.opacity = '0'; setTimeout(() => toast.remove(), 200); }, 2800);
+        }
+
+        function updateTime() {
+            const now = new Date();
+            const yyyy = now.getFullYear();
+            const mm = String(now.getMonth() + 1).padStart(2, '0');
+            const dd = String(now.getDate()).padStart(2, '0');
+            const hh = String(now.getHours()).padStart(2, '0');
+            const mi = String(now.getMinutes()).padStart(2, '0');
+            document.getElementById('last-update').textContent = `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+        }
+
+        // ==================== 初始化 ====================
+
+        function init() {
+            // 显示管理员名称（如有登录信息）
+            const name = localStorage.getItem('currentUserName');
+            if (name) document.getElementById('admin-name').textContent = name;
+
+            // 初始加载
+            loadAll();
+
+            // 每 60 秒自动刷新
+            setInterval(loadAll, 60000);
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
