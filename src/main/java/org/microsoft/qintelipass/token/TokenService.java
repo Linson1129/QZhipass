@@ -3,21 +3,29 @@ package org.microsoft.qintelipass.token;
 import org.microsoft.qintelipass.models.User;
 import org.microsoft.qintelipass.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import jakarta.annotation.PostConstruct;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * Token 用量统计与限额管理服务（独立包，与原注销账户后端分离）
+ *
+ * 规则遵循：
+ * - FK 使用实体关联（@ManyToOne/@JoinColumn），不使用基本数据类型
+ * - 日期时间使用 Timestamp（Instant → epoch 毫秒）
  */
-@Service
+@Service("tokenUsageService")
 public class TokenService {
 
     private static final String QUOTA_KEY = "global_token_quota";
@@ -32,6 +40,12 @@ public class TokenService {
     @Autowired
     private UserRepository userRepository;
 
+    @Autowired
+    private UserTokenQuotaRepository userTokenQuotaRepository;
+
+    @Autowired
+    private QuotaAdjustLogRepository quotaAdjustLogRepository;
+
     /**
      * 应用启动时，若尚未配置统一限额，则写入默认值
      */
@@ -44,38 +58,175 @@ public class TokenService {
 
     // ===================== 限额管理 =====================
 
+    /** 获取全局默认限额（即"个人token统计"模块的默认限额字段） */
     public long getGlobalQuota() {
         return globalConfigRepository.findById(QUOTA_KEY)
                 .map(c -> {
-                    try {
-                        return Long.parseLong(c.getValue());
-                    } catch (NumberFormatException e) {
-                        return DEFAULT_QUOTA;
-                    }
+                    try { return Long.parseLong(c.getValue()); }
+                    catch (NumberFormatException e) { return DEFAULT_QUOTA; }
                 })
                 .orElse(DEFAULT_QUOTA);
     }
 
-    /** 获取某个用户的 Token 限额（优先使用个人配额，否则使用全局配额） */
+    /**
+     * 获取某个用户的 Token 限额。
+     * 若管理员曾单独调整过该员工，则返回个性化值；否则返回全局默认值。
+     */
     public long getUserQuota(Long userId) {
         if (userId == null) return getGlobalQuota();
-        return globalConfigRepository.findById("user_quota_" + userId)
-                .map(c -> {
-                    try {
-                        return Long.parseLong(c.getValue());
-                    } catch (NumberFormatException e) {
-                        return getGlobalQuota();
-                    }
-                })
+        return userTokenQuotaRepository.findByUserId(userId)
+                .map(UserTokenQuota::getDailyQuota)
                 .orElseGet(this::getGlobalQuota);
     }
 
-    /** 管理员统一设置所有用户的 token 限额（立即生效） */
+    /** 管理员统一设置全局默认限额（立即生效） */
     public void setGlobalQuota(long quota) {
         if (quota < 0) {
             throw new IllegalArgumentException("Token quota must not be negative");
         }
         globalConfigRepository.save(new GlobalConfig(QUOTA_KEY, String.valueOf(quota)));
+    }
+
+    /**
+     * 管理员调整指定员工的 Token 上限，并记录操作日志。
+     * 当新限额 > 当前已消耗量时，员工立即恢复对话能力。
+     *
+     * @param adminUserId  操作管理员ID
+     * @param targetUserId 目标员工ID
+     * @param newQuota     新上限值
+     * @return 调整后的状态信息
+     */
+    @Transactional
+    public Map<String, Object> adjustUserQuota(Long adminUserId, Long targetUserId, long newQuota) {
+        if (newQuota < 0) {
+            throw new IllegalArgumentException("Token quota must not be negative");
+        }
+
+        User admin = userRepository.findById(adminUserId)
+                .orElseThrow(() -> new IllegalArgumentException("Admin user not found: " + adminUserId));
+        User target = userRepository.findById(targetUserId)
+                .orElseThrow(() -> new IllegalArgumentException("Target user not found: " + targetUserId));
+
+        // 1. 记录旧限额
+        long oldQuota = getUserQuota(targetUserId);
+
+        // 2. 计算当时已消耗量
+        long currentConsumption = getTodayConsumption(targetUserId);
+
+        // 3. 更新或创建个性化配额记录
+        UserTokenQuota quota = userTokenQuotaRepository.findByUserId(targetUserId)
+                .orElse(new UserTokenQuota(target, newQuota, admin));
+        quota.setDailyQuota(newQuota);
+        quota.setUpdatedBy(admin);
+        quota.setUpdatedAt(Instant.now());
+        userTokenQuotaRepository.save(quota);
+
+        // 4. 记录操作日志
+        QuotaAdjustLog log = new QuotaAdjustLog(admin, target, oldQuota, newQuota, currentConsumption);
+        quotaAdjustLogRepository.save(log);
+
+        // 5. 构建返回结果
+        long remaining = Math.max(0, newQuota - currentConsumption);
+        boolean canChat = newQuota > currentConsumption;
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("userId", targetUserId);
+        result.put("userName", target.getName());
+        result.put("oldQuota", oldQuota);
+        result.put("newQuota", newQuota);
+        result.put("currentConsumption", currentConsumption);
+        result.put("remaining", remaining);
+        result.put("canChat", canChat);
+        result.put("isPersonalized", true);
+        return result;
+    }
+
+    /** 重置员工为全局默认限额（删除个性化配额记录） */
+    @Transactional
+    public Map<String, Object> resetUserQuota(Long adminUserId, Long targetUserId) {
+        User admin = userRepository.findById(adminUserId)
+                .orElseThrow(() -> new IllegalArgumentException("Admin user not found"));
+        User target = userRepository.findById(targetUserId)
+                .orElseThrow(() -> new IllegalArgumentException("Target user not found"));
+
+        long oldQuota = getUserQuota(targetUserId);
+        long newQuota = getGlobalQuota();
+        long currentConsumption = getTodayConsumption(targetUserId);
+
+        // 删除个性化配额（恢复全局默认）
+        userTokenQuotaRepository.deleteByUserId(targetUserId);
+
+        // 记录操作日志
+        QuotaAdjustLog log = new QuotaAdjustLog(admin, target, oldQuota, newQuota, currentConsumption);
+        quotaAdjustLogRepository.save(log);
+
+        long remaining = Math.max(0, newQuota - currentConsumption);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("userId", targetUserId);
+        result.put("userName", target.getName());
+        result.put("oldQuota", oldQuota);
+        result.put("newQuota", newQuota);
+        result.put("currentConsumption", currentConsumption);
+        result.put("remaining", remaining);
+        result.put("isPersonalized", false);
+        return result;
+    }
+
+    /** 查询某员工是否有个性化配额 */
+    public boolean hasPersonalizedQuota(Long userId) {
+        return userTokenQuotaRepository.findByUserId(userId).isPresent();
+    }
+
+    /** 获取某员工个性化配额详情 */
+    public Optional<UserTokenQuota> getPersonalizedQuota(Long userId) {
+        return userTokenQuotaRepository.findByUserId(userId);
+    }
+
+    // ===================== 操作日志查询 =====================
+
+    /**
+     * 分页查询配额调整操作日志。
+     * 支持按操作人、目标员工、时间范围筛选。
+     *
+     * @param operatorId   操作人ID（可选）
+     * @param targetUserId 目标员工ID（可选）
+     * @param startTime    起始时间（epoch 毫秒，可选）
+     * @param endTime      结束时间（epoch 毫秒，可选）
+     * @param page         页码（0-based）
+     * @param size         每页条数
+     */
+    public Map<String, Object> queryQuotaLogs(Long operatorId, Long targetUserId,
+                                               Long startTime, Long endTime,
+                                               int page, int size) {
+        Instant start = startTime != null ? Instant.ofEpochMilli(startTime) : null;
+        Instant end = endTime != null ? Instant.ofEpochMilli(endTime) : null;
+
+        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "operatedAt"));
+        Page<QuotaAdjustLog> logPage = quotaAdjustLogRepository.findLogs(
+                operatorId, targetUserId, start, end, pageable);
+
+        List<Map<String, Object>> logs = logPage.getContent().stream().map(l -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", l.getId());
+            m.put("operatorId", l.getOperator() != null ? l.getOperator().getId() : null);
+            m.put("operatorName", l.getOperator() != null ? l.getOperator().getName() : null);
+            m.put("targetUserId", l.getTargetUser() != null ? l.getTargetUser().getId() : null);
+            m.put("targetUserName", l.getTargetUserName());
+            m.put("oldQuota", l.getOldQuota());
+            m.put("newQuota", l.getNewQuota());
+            m.put("currentConsumption", l.getCurrentConsumption());
+            m.put("operatedAt", l.getOperatedAt().toEpochMilli()); // epoch 毫秒，前端直接使用
+            return m;
+        }).toList();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", logs);
+        result.put("totalElements", logPage.getTotalElements());
+        result.put("totalPages", logPage.getTotalPages());
+        result.put("number", logPage.getNumber());
+        result.put("size", logPage.getSize());
+        return result;
     }
 
     // ===================== 用量记录 =====================
@@ -85,9 +236,11 @@ public class TokenService {
      */
     @Transactional
     public void recordUsage(Long userId, String model, long promptTokens, long completionTokens) {
-        if (userId == null || model == null) {
-            return;
-        }
+        if (userId == null || model == null) return;
+
+        User user = userRepository.findById(userId).orElse(null);
+        if (user == null) return;
+
         LocalDate today = LocalDate.now();
         TokenUsage tu = tokenUsageRepository
                 .findByUserIdAndUsageDateAndModel(userId, today, model)
@@ -95,7 +248,7 @@ public class TokenService {
 
         if (tu == null) {
             tu = new TokenUsage();
-            tu.setUserId(userId);
+            tu.setUser(user);
             tu.setUsageDate(today);
             tu.setModel(model);
         }
@@ -103,6 +256,14 @@ public class TokenService {
         tu.setCompletionTokens(tu.getCompletionTokens() + completionTokens);
         tu.setTotalTokens(tu.getTotalTokens() + promptTokens + completionTokens);
         tokenUsageRepository.save(tu);
+    }
+
+    /** 查询某用户当日的总消耗量 */
+    public long getTodayConsumption(Long userId) {
+        if (userId == null) return 0;
+        LocalDate today = LocalDate.now();
+        List<TokenUsage> list = tokenUsageRepository.findByUserIdAndUsageDate(userId, today);
+        return list.stream().mapToLong(TokenUsage::getTotalTokens).sum();
     }
 
     // ===================== 状态查询 =====================
@@ -114,12 +275,23 @@ public class TokenService {
         List<TokenUsage> list = tokenUsageRepository.findByUserIdAndUsageDate(userId, today);
         long used = list.stream().mapToLong(TokenUsage::getTotalTokens).sum();
         long remaining = Math.max(0, quota - used);
-        return new UserTokenStatus(userId, quota, used, remaining, used >= quota);
+
+        String department = null;
+        String userName = null;
+        if (userId != null) {
+            var userOpt = userRepository.findById(userId);
+            if (userOpt.isPresent()) {
+                var u = userOpt.get();
+                department = u.getDepartment();
+                userName = u.getName();
+            }
+        }
+        return new UserTokenStatus(userId, quota, used, remaining, used >= quota, department, userName);
     }
 
     /**
      * 发起对话前检测是否超额
-     * @param estimatedTokens 本次对话预计消耗（缺省视为一次普通对话）
+     * @param estimatedTokens 本次对话预计消耗
      */
     public boolean checkQuota(Long userId, long estimatedTokens) {
         UserTokenStatus status = getDailyStatus(userId);
@@ -133,18 +305,16 @@ public class TokenService {
         long quota = getGlobalQuota();
         LocalDate today = LocalDate.now();
 
-        // 今日所有用量，按用户汇总
         List<TokenUsage> todayList = tokenUsageRepository.findByUsageDate(today);
-        Map<Long, Long> sumByUser = todayList.stream()
-                .collect(Collectors.groupingBy(TokenUsage::getUserId,
-                        Collectors.summingLong(TokenUsage::getTotalTokens)));
+        Map<Long, Long> sumByUser = new LinkedHashMap<>();
+        for (TokenUsage t : todayList) {
+            Long uid = t.getUserId();
+            sumByUser.merge(uid, t.getTotalTokens(), Long::sum);
+        }
 
         long activeUsers = sumByUser.size();
-        long overQuotaUsers = sumByUser.values().stream()
-                .filter(v -> v >= quota)
-                .count();
+        long overQuotaUsers = sumByUser.values().stream().filter(v -> v >= quota).count();
 
-        // 最近 7 天日期
         List<String> dates = new ArrayList<>();
         for (int i = 6; i >= 0; i--) {
             dates.add(today.minusDays(i).toString());
@@ -167,34 +337,34 @@ public class TokenService {
 
     /** 管理员视角：按部门统计当日 token 使用情况 + 员工明细 */
     public DepartmentUsageData getDepartmentUsage() {
-        long quota = getGlobalQuota();
+        long globalQuota = getGlobalQuota();
         LocalDate today = LocalDate.now();
 
         List<TokenUsage> todayList = tokenUsageRepository.findByUsageDate(today);
-        Map<Long, Long> sumByUser = todayList.stream()
-                .collect(Collectors.groupingBy(TokenUsage::getUserId,
-                        Collectors.summingLong(TokenUsage::getTotalTokens)));
+        Map<Long, Long> sumByUser = new LinkedHashMap<>();
+        for (TokenUsage t : todayList) {
+            Long uid = t.getUserId();
+            sumByUser.merge(uid, t.getTotalTokens(), Long::sum);
+        }
 
         List<User> users = userRepository.findAll();
 
-        // 部门聚合
         Map<String, long[]> deptAgg = new LinkedHashMap<>();
         List<DepartmentUsageData.UserUsageRow> userRows = new ArrayList<>();
 
         for (User u : users) {
             long used = sumByUser.getOrDefault(u.getId(), 0L);
+            long quota = getUserQuota(u.getId()); // 优先个人配额
             boolean over = used >= quota;
             String dept = u.getDepartment() == null ? "未分配" : u.getDepartment();
 
             userRows.add(new DepartmentUsageData.UserUsageRow(
                     u.getId(), u.getName(), dept, used, quota, over));
 
-            long[] agg = deptAgg.computeIfAbsent(dept, k -> new long[3]); // [userCount, totalTokens, overQuotaCount]
+            long[] agg = deptAgg.computeIfAbsent(dept, k -> new long[3]);
             agg[0] += 1;
             agg[1] += used;
-            if (over) {
-                agg[2] += 1;
-            }
+            if (over) agg[2] += 1;
         }
 
         List<DepartmentUsageData.DepartmentRow> deptRows = deptAgg.entrySet().stream()
@@ -202,7 +372,6 @@ public class TokenService {
                 .sorted(Comparator.comparing(DepartmentUsageData.DepartmentRow::department))
                 .toList();
 
-        // 员工明细按部门、用量降序
         userRows.sort(Comparator.comparing(DepartmentUsageData.UserUsageRow::department)
                 .thenComparing(DepartmentUsageData.UserUsageRow::totalTokens, Comparator.reverseOrder()));
 
@@ -216,9 +385,10 @@ public class TokenService {
         LocalDate start = today.minusDays(6);
 
         List<TokenUsage> usages = tokenUsageRepository.findByUserIdAndUsageDateBetween(userId, start, today);
-        Map<LocalDate, Long> dateMap = usages.stream()
-                .collect(Collectors.groupingBy(TokenUsage::getUsageDate,
-                        Collectors.summingLong(TokenUsage::getTotalTokens)));
+        Map<LocalDate, Long> dateMap = new LinkedHashMap<>();
+        for (TokenUsage t : usages) {
+            dateMap.merge(t.getUsageDate(), t.getTotalTokens(), Long::sum);
+        }
 
         String[] weekdays = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
         List<String> labels = new ArrayList<>();
@@ -261,7 +431,7 @@ public class TokenService {
                     m.put("createdAt", t.getUsageDate().toString());
                     return m;
                 })
-                .collect(Collectors.toList());
+                .toList();
     }
 
     // ===================== 前端适配：管理员仪表盘 =====================
@@ -270,17 +440,17 @@ public class TokenService {
         long quota = getGlobalQuota();
         LocalDate today = LocalDate.now();
 
-        // 今日所有用量，按用户汇总
         List<TokenUsage> todayList = tokenUsageRepository.findByUsageDate(today);
-        Map<Long, Long> sumByUser = todayList.stream()
-                .collect(Collectors.groupingBy(TokenUsage::getUserId,
-                        Collectors.summingLong(TokenUsage::getTotalTokens)));
+        Map<Long, Long> sumByUser = new LinkedHashMap<>();
+        for (TokenUsage t : todayList) {
+            Long uid = t.getUserId();
+            sumByUser.merge(uid, t.getTotalTokens(), Long::sum);
+        }
 
         long activeUsers = sumByUser.size();
         long overQuotaUsers = sumByUser.values().stream().filter(v -> v >= quota).count();
         long todayTotal = sumByUser.values().stream().mapToLong(Long::longValue).sum();
 
-        // 图表：近7天各模型每日消耗
         List<String> dates = new ArrayList<>();
         String[] weekdays = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
         for (int i = 6; i >= 0; i--) {
@@ -316,7 +486,6 @@ public class TokenService {
         chartData.put("labels", dates);
         chartData.put("datasets", datasets);
 
-        // 员工列表
         List<Map<String, Object>> employees = buildEmployeeListForFrontend(today, sumByUser, quota);
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -339,7 +508,7 @@ public class TokenService {
         return allUsers.stream().map(u -> {
             Map<String, Object> emp = new LinkedHashMap<>();
             long used = sumByUser.getOrDefault(u.getId(), 0L);
-            long limit = getUserQuota(u.getId());  // 优先个人配额
+            long limit = getUserQuota(u.getId());
             String status;
             if (used >= limit) status = "over";
             else if (limit > 0 && (double) used / limit > 0.85) status = "warning";
@@ -347,22 +516,18 @@ public class TokenService {
 
             emp.put("id", String.valueOf(u.getId()));
             emp.put("name", u.getName());
-            emp.put("dept", u.getDepartment() != null ? u.getDepartment() : "未分配");
-            emp.put("used", used);
-            emp.put("limit", limit);
-            emp.put("status", status);
+            emp.put("department", u.getDepartment() != null ? u.getDepartment() : "未分配");
+            emp.put("totalTokens", used);
+            emp.put("quota", limit);
+            emp.put("overQuota", used >= limit);
+            emp.put("isPersonalized", hasPersonalizedQuota(u.getId()));
             return emp;
-        }).collect(Collectors.toList());
+        }).toList();
     }
 
     // ===================== 用户配额 =====================
 
-    /** 设定全局配额 */
-    public void setGlobalQuotaWithCount(long quota) {
-        setGlobalQuota(quota);
-    }
-
-    /** 设定单个用户的配额（通过 global_config 存储） */
+    @Deprecated
     public void setUserQuota(Long userId, long quota) {
         if (quota < 0) throw new IllegalArgumentException("Token quota must not be negative");
         globalConfigRepository.save(new GlobalConfig("user_quota_" + userId, String.valueOf(quota)));
@@ -394,14 +559,13 @@ public class TokenService {
         Random random = new Random(42);
 
         String[] models = {"千问", "DeepSeek", "Llama-3.1"};
-        // 用 Set 确保 (user_id, usage_date, model) 唯一
         Set<String> seen = new HashSet<>();
 
         for (User user : users) {
             if (user.getStatus() != null && "CANCELLED".equals(user.getStatus().name())) continue;
             for (int dayOffset = 6; dayOffset >= 0; dayOffset--) {
                 LocalDate date = today.minusDays(dayOffset);
-                int recordCount = random.nextInt(3) + 2; // 2-4 per day, with 3 models max
+                int recordCount = random.nextInt(3) + 2;
                 int created = 0;
                 for (int attempt = 0; attempt < recordCount + 2 && created < recordCount; attempt++) {
                     String model = models[random.nextInt(models.length)];
@@ -411,7 +575,7 @@ public class TokenService {
 
                     long tokens = random.nextInt(50000) + 5000;
                     TokenUsage tu = new TokenUsage();
-                    tu.setUserId(user.getId());
+                    tu.setUser(user);
                     tu.setUsageDate(date);
                     tu.setModel(model);
                     tu.setPromptTokens(tokens / 2);
@@ -426,16 +590,20 @@ public class TokenService {
         }
     }
 
-    // ===================== 每日 0 点清零 / 清理 =====================
+    // ===================== 定时清理 =====================
 
     /**
-     * 每日 0 点执行：清理 30 天前的旧用量记录。
-     * 由于用量按日期分表记录，新的一天会自动从 0 开始（自然"清零"）。
+     * 每日 0 点执行：
+     * - 清理 30 天前的旧用量记录
+     * - 清理 90 天前的旧操作日志
      */
     @Scheduled(cron = "0 0 0 * * *")
     @Transactional
     public void dailyReset() {
-        LocalDate cutoff = LocalDate.now().minusDays(30);
-        tokenUsageRepository.deleteByUsageDateBefore(cutoff);
+        LocalDate cutoffUsage = LocalDate.now().minusDays(30);
+        tokenUsageRepository.deleteByUsageDateBefore(cutoffUsage);
+
+        Instant cutoffLog = Instant.now().minus(90, ChronoUnit.DAYS);
+        quotaAdjustLogRepository.deleteByCreatedAtBefore(cutoffLog);
     }
 }

@@ -25,7 +25,7 @@ public class InterceptorConfig implements WebMvcConfigurer {
                         "/api/v1/portal/register",    // 注册接口
                         "/api/admin/users",           // 管理员用户列表
                         "/api/admin/token/**",        // Token 管理后台
-                        "/api/v1/admin/token/**",     // Token 前端适配
+                        "/api/v1/admin/token/**",     // Token 前端适配（含配额、日志）
                         "/api/user/token",            // 用户 Token 查询
                         "/api/v1/user/token/**",      // 用户 Token 前端适配
                         "/api/v1/chat/**"             // 聊天检测接口

@@ -32,10 +32,6 @@ public class TokenController {
 
     // ============ 前端适配：用户 Token 用量（employee-token-stats 页面） ============
 
-    /**
-     * GET /api/v1/user/token/usage
-     * 前端 employee-token-stats 页面期望的格式
-     */
     @GetMapping("/api/v1/user/token/usage")
     public ResponseEntity<?> getUserTokenUsage(
             @RequestHeader(value = "X-User-Id", required = false) Long userId) {
@@ -53,13 +49,11 @@ public class TokenController {
         data.put("used_today", status.used());
         data.put("remaining", status.remaining());
         data.put("status", st);
+        data.put("department", status.department());
+        data.put("name", status.userName());
         return ResponseEntity.ok(Map.of("success", true, "rawData", data));
     }
 
-    /**
-     * GET /api/v1/user/token/weekly
-     * 本周每日消耗趋势 + 月统计
-     */
     @GetMapping("/api/v1/user/token/weekly")
     public ResponseEntity<?> getUserWeeklyTrend(
             @RequestHeader(value = "X-User-Id", required = false) Long userId) {
@@ -71,10 +65,6 @@ public class TokenController {
         return ResponseEntity.ok(Map.of("success", true, "rawData", data));
     }
 
-    /**
-     * GET /api/v1/user/token/conversations
-     * 最近对话 Token 消耗记录
-     */
     @GetMapping("/api/v1/user/token/conversations")
     public ResponseEntity<?> getRecentConversations(
             @RequestHeader(value = "X-User-Id", required = false) Long userId) {
@@ -88,21 +78,18 @@ public class TokenController {
 
     // ============ 管理员视角 ============
 
-    /** 可视化看板数据 */
     @GetMapping("/api/admin/token/dashboard")
     public ResponseEntity<?> getDashboard() {
         DashboardData data = tokenService.getDashboard();
         return ResponseEntity.ok(Map.of("success", true, "data", data));
     }
 
-    /** 按部门统计的当日 token 使用表 */
     @GetMapping("/api/admin/token/usage")
     public ResponseEntity<?> getDepartmentUsage() {
         DepartmentUsageData data = tokenService.getDepartmentUsage();
         return ResponseEntity.ok(Map.of("success", true, "data", data));
     }
 
-    /** 统一设置所有用户的 token 限额（保存后立即生效） */
     @PostMapping("/api/admin/token/quota")
     public ResponseEntity<?> setQuota(@RequestBody Map<String, Object> body) {
         Object quotaObj = body.get("quota");
@@ -123,13 +110,9 @@ public class TokenController {
         return ResponseEntity.ok(Map.of("success", true, "message", "Quota updated", "quota", quota));
     }
 
-    // ============ 前端适配：管理员仪表盘 + 配额（admin-token-dashboard 页面） ============
+    // ============ 前端适配：管理员仪表盘 + 配额 ============
 
-    /**
-     * GET /api/v1/admin/token/dashboard
-     * 前端 admin-token-dashboard 页面期望的 KPI + 图表 + 员工列表格式
-     */
-    @GetMapping("/api/v1/admin/token/dashboard")
+    @GetMapping({"/api/v1/admin/token/dashboard", "/api/admin/token/dashboard"})
     public ResponseEntity<?> getDashboardForFrontend() {
         try {
             Map<String, Object> rawData = tokenService.getDashboardForFrontend();
@@ -139,9 +122,22 @@ public class TokenController {
         }
     }
 
+    @GetMapping("/api/v1/admin/token/usage")
+    public ResponseEntity<?> getUsageForFrontend() {
+        try {
+            DepartmentUsageData data = tokenService.getDepartmentUsage();
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("userUsageRows", data.users());
+            result.put("departmentRows", data.departments());
+            return ResponseEntity.ok(Map.of("success", true, "data", result));
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
     /**
      * PUT /api/v1/admin/token/quota
-     * 前端期望的参数名是 daily_token_limit
+     * 设置全局默认限额
      */
     @PutMapping("/api/v1/admin/token/quota")
     public ResponseEntity<?> setQuotaForFrontend(@RequestBody Map<String, Object> body) {
@@ -163,7 +159,13 @@ public class TokenController {
 
     /**
      * PUT /api/v1/admin/token/quota/{userId}
-     * 管理员单独调整某用户的配额
+     * 管理员单独调整某员工的 Token 上限（自动记录操作日志）。
+     *
+     * 请求体：
+     * { "daily_token_limit": 150000, "adminUserId": 1 }
+     *
+     * 当新限额 > 已消耗量时，员工立即恢复对话能力。
+     * 前端轮询 /api/v1/user/token/usage 即可看到实时的剩余额度变化。
      */
     @PutMapping("/api/v1/admin/token/quota/{userId}")
     public ResponseEntity<?> setUserQuotaForFrontend(
@@ -171,27 +173,113 @@ public class TokenController {
             @RequestBody Map<String, Object> body) {
         Object limitObj = body.get("daily_token_limit");
         if (limitObj == null) {
-            return ResponseEntity.badRequest().body(Map.of("success", false, "message", "daily_token_limit is required"));
+            return ResponseEntity.badRequest()
+                    .body(Map.of("success", false, "message", "daily_token_limit is required"));
         }
         long newLimit = Long.parseLong(String.valueOf(limitObj));
         if (newLimit < 1000) {
-            return ResponseEntity.badRequest().body(Map.of("success", false, "message", "Token limit must be >= 1000"));
+            return ResponseEntity.badRequest()
+                    .body(Map.of("success", false, "message", "Token limit must be >= 1000"));
         }
-        tokenService.setUserQuota(userId, newLimit);
-        return ResponseEntity.ok(Map.of("success", true, "message", "User quota updated"));
+
+        // 操作人（管理员）ID：优先从请求体获取，其次从 Header
+        Long adminUserId = parseLong(body.get("adminUserId"));
+        if (adminUserId == null) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("success", false, "message", "adminUserId is required"));
+        }
+
+        try {
+            Map<String, Object> result = tokenService.adjustUserQuota(adminUserId, userId, newLimit);
+            return ResponseEntity.ok(Map.of("success", true, "rawData", result,
+                    "message", "User quota updated, log recorded"));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("success", false, "message", ex.getMessage()));
+        }
     }
 
-    private long countTotalUsers() {
-        try { return tokenService.countActiveUsers(); } catch (Exception e) { return 0; }
+    /**
+     * DELETE /api/v1/admin/token/quota/{userId}
+     * 重置某员工为全局默认限额（删除个性化配额记录）
+     */
+    @DeleteMapping("/api/v1/admin/token/quota/{userId}")
+    public ResponseEntity<?> resetUserQuota(
+            @PathVariable Long userId,
+            @RequestParam Long adminUserId) {
+        try {
+            Map<String, Object> result = tokenService.resetUserQuota(adminUserId, userId);
+            return ResponseEntity.ok(Map.of("success", true, "rawData", result,
+                    "message", "User quota reset to system default"));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("success", false, "message", ex.getMessage()));
+        }
+    }
+
+    /**
+     * GET /api/v1/admin/token/quota/{userId}
+     * 查询某员工的配额详情（是否个性化、当前值等）
+     */
+    @GetMapping("/api/v1/admin/token/quota/{userId}")
+    public ResponseEntity<?> getUserQuotaDetail(@PathVariable Long userId) {
+        long effectiveQuota = tokenService.getUserQuota(userId);
+        long globalQuota = tokenService.getGlobalQuota();
+        boolean isPersonalized = tokenService.hasPersonalizedQuota(userId);
+        long consumed = tokenService.getTodayConsumption(userId);
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("userId", userId);
+        data.put("effectiveQuota", effectiveQuota);
+        data.put("globalDefaultQuota", globalQuota);
+        data.put("isPersonalized", isPersonalized);
+        data.put("todayConsumed", consumed);
+        data.put("todayRemaining", Math.max(0, effectiveQuota - consumed));
+
+        if (isPersonalized) {
+            tokenService.getPersonalizedQuota(userId).ifPresent(q -> {
+                data.put("personalizedQuota", q.getDailyQuota());
+                data.put("updatedBy", q.getUpdatedBy() != null ? q.getUpdatedBy().getId() : null);
+                data.put("updatedByName", q.getUpdatedBy() != null ? q.getUpdatedBy().getName() : null);
+                data.put("updatedAt", q.getUpdatedAt() != null ? q.getUpdatedAt().toEpochMilli() : null);
+            });
+        }
+
+        return ResponseEntity.ok(Map.of("success", true, "data", data));
+    }
+
+    /**
+     * GET /api/v1/admin/token/quota/logs
+     * 查询配额调整操作日志（分页、支持筛选）。
+     *
+     * Query 参数（全部可选）：
+     * - operatorId：操作人（管理员）ID
+     * - targetUserId：目标员工ID
+     * - startTime：起始时间（epoch 毫秒）
+     * - endTime：结束时间（epoch 毫秒）
+     * - page：页码（0-based，默认 0）
+     * - size：每页条数（默认 20）
+     */
+    @GetMapping("/api/v1/admin/token/quota/logs")
+    public ResponseEntity<?> getQuotaLogs(
+            @RequestParam(required = false) Long operatorId,
+            @RequestParam(required = false) Long targetUserId,
+            @RequestParam(required = false) Long startTime,
+            @RequestParam(required = false) Long endTime,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        try {
+            Map<String, Object> logs = tokenService.queryQuotaLogs(
+                    operatorId, targetUserId, startTime, endTime, page, size);
+            return ResponseEntity.ok(Map.of("success", true, "rawData", logs));
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of("success", false, "message", e.getMessage()));
+        }
     }
 
     // ============ 对话（聊天）场景 ============
 
-    /**
-     * 每次发起对话框前检测是否超额。
-     * 请求体：{ "userId": 1, "model": "gpt-4o", "estimatedTokens": 2000 }
-     */
-    @PostMapping("/v1/chat/check")
+    @PostMapping({"/v1/chat/check", "/api/v1/chat/check"})
     public ResponseEntity<?> checkChat(@RequestBody Map<String, Object> body) {
         Long userId = parseUserId(body.get("userId"));
         if (userId == null) {
@@ -213,11 +301,7 @@ public class TokenController {
         ));
     }
 
-    /**
-     * 记录一次对话实际产生的 token 消耗（用于更新员工每日用量）。
-     * 请求体：{ "userId": 1, "model": "gpt-4o", "promptTokens": 800, "completionTokens": 1200 }
-     */
-    @PostMapping("/v1/chat/usage")
+    @PostMapping({"/v1/chat/usage", "/api/v1/chat/usage"})
     public ResponseEntity<?> recordChat(@RequestBody Map<String, Object> body) {
         Long userId = parseUserId(body.get("userId"));
         if (userId == null) {
@@ -235,35 +319,31 @@ public class TokenController {
     // ============ 工具方法 ============
 
     private Long parseUserId(String userIdStr) {
-        if (userIdStr == null || userIdStr.trim().isEmpty()) {
-            return null;
-        }
-        try {
-            return Long.parseLong(userIdStr.trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        if (userIdStr == null || userIdStr.trim().isEmpty()) return null;
+        try { return Long.parseLong(userIdStr.trim()); }
+        catch (NumberFormatException e) { return null; }
     }
 
     private Long parseUserId(Object obj) {
-        if (obj == null) {
-            return null;
-        }
-        try {
-            return Long.parseLong(String.valueOf(obj).trim());
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        if (obj == null) return null;
+        try { return Long.parseLong(String.valueOf(obj).trim()); }
+        catch (NumberFormatException e) { return null; }
     }
 
     private long toLong(Object obj, long def) {
-        if (obj == null) {
-            return def;
-        }
-        try {
-            return Long.parseLong(String.valueOf(obj));
-        } catch (NumberFormatException e) {
-            return def;
-        }
+        if (obj == null) return def;
+        try { return Long.parseLong(String.valueOf(obj)); }
+        catch (NumberFormatException e) { return def; }
+    }
+
+    private Long parseLong(Object obj) {
+        if (obj == null) return null;
+        try { return Long.parseLong(String.valueOf(obj).trim()); }
+        catch (NumberFormatException e) { return null; }
+    }
+
+    private long countTotalUsers() {
+        try { return tokenService.countActiveUsers(); }
+        catch (Exception e) { return 0; }
     }
 }

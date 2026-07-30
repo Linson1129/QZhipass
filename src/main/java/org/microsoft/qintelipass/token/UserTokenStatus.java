@@ -8,6 +8,12 @@ public record UserTokenStatus(
         long quota,
         long used,
         long remaining,
-        boolean overQuota
+        boolean overQuota,
+        String department,
+        String userName
 ) {
+    /** 兼容旧构造器（无 department/name） */
+    public UserTokenStatus(Long userId, long quota, long used, long remaining, boolean overQuota) {
+        this(userId, quota, used, remaining, overQuota, null, null);
+    }
 }
